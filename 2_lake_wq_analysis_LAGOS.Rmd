@@ -1,0 +1,198 @@
+---
+title: "2_lake_wq_analysis"
+author: "Austin Hopkins"
+date: "2/24/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse) # Tidy packages
+library(sf) #Spatial package that can read and create shapefiles 
+library(mapview) #Interactive maps
+library(LAGOSNE) #Lots and lots of clean lake data
+library(USAboundaries) #USA states and counties
+library(lubridate) #For dealing with date and time
+```
+
+
+# LAGOS Analysis
+
+
+## Loading in data
+
+
+### First download and then specifically grab the locus (or site lat longs)
+```{r data-read}
+#Lagos download script
+#lagosne_get(dest_folder = LAGOSNE:::lagos_path(),overwrite=T)
+
+#Load in lagos
+lagos <- lagosne_load()
+
+
+#Grab the lake centroid info
+lake_centers <- lagos$locus
+
+# Make an sf object 
+spatial_lakes <- st_as_sf(lake_centers,coords=c('nhd_long','nhd_lat'),
+                          crs=4326) %>%
+   st_transform(2163)
+
+#Grab the water quality data
+nutr <- lagos$epi_nutr
+
+#Look at column names
+#names(nutr)
+```
+
+### Subset columns nutr to only keep key info that we want
+
+
+```{r}
+clarity_only <- nutr %>%
+  select(lagoslakeid,sampledate,chla,doc,secchi) %>%
+  mutate(sampledate = as.character(sampledate) %>% ymd(.))
+
+```
+
+
+### Keep sites with at least 200 observations 
+
+```{r}
+
+#Look at the number of rows of dataset
+#nrow(clarity_only)
+
+chla_secchi <- clarity_only %>%
+  filter(!is.na(chla),
+         !is.na(secchi))
+
+# How many observatiosn did we lose?
+# nrow(clarity_only) - nrow(chla_secchi)
+
+
+# Keep only the lakes with at least 200 observations of secchi and chla
+chla_secchi_200 <- chla_secchi %>%
+  group_by(lagoslakeid) %>%
+  mutate(count = n()) %>%
+  filter(count > 200)
+
+
+```
+
+
+### Join water quality data to spatial data
+
+```{r}
+spatial_200 <- inner_join(spatial_lakes,chla_secchi_200 %>%
+                            distinct(lagoslakeid,.keep_all=T),
+                          by='lagoslakeid')
+
+
+```
+
+### Mean Chl_a map
+
+```{r}
+### Take the mean chl_a and secchi by lake
+
+mean_values_200 <- chla_secchi_200 %>%
+  # Take summary by lake id
+  group_by(lagoslakeid) %>%
+  # take mean chl_a per lake id
+  summarize(mean_chl = mean(chla,na.rm=T),
+            mean_secchi=mean(secchi,na.rm=T)) %>%
+  #Get rid of NAs
+  filter(!is.na(mean_chl),
+         !is.na(mean_secchi)) %>%
+  # Take the log base 10 of the mean_chl
+  mutate(log10_mean_chl = log10(mean_chl))
+
+#Join datasets
+mean_spatial <- inner_join(spatial_lakes,mean_values_200,
+                          by='lagoslakeid') 
+
+#Make a map
+mapview(mean_spatial,zcol='log10_mean_chl')
+```
+
+
+# Class work
+
+## 1) What is the correlation between Secchi Disk Depth and Chlorophyll a for
+sites with at least 200 observations?
+
+- Here, I just want a plot of chla vs secchi for all sites 
+
+```{r}
+ggplot(chla_secchi_200, aes(x = chla, y = secchi)) + 
+  geom_point()
+```
+
+
+## Why might this be the case? 
+There isnt a strong positive or negative trend on the relationship between chlorophyll-a and secchi disk readings, there seems to be a weak negative curvilinear trend as chlorophyll-a increases, secchi disk depth increases. It seems that there are a few outliers with extremely high chlorophyll-a levels. If those had been filtered out then this trend would likely be more observable. There is a huge number of samples that have low values for both chlorophyll- a and secchi. This suggests that there are other variables at work here affecting the water quality. This could be due to soil loss from upstream for example. I noticed there are not high high readings paired together. This indicates that if chlorophyll-a is high, then secchi readings will be lower, but there are several low chlorophyll-a readings with low secchi reading, most porbably due to some other water quality variable affecting the lake clarity. 
+
+
+
+## 2) What states have the most data? 
+
+### 2a) First you will need to make a lagos spatial dataset that has the total 
+number of counts per site.
+
+```{r}
+
+nutr_spatial <- inner_join(nutr, spatial_lakes, by = "lagoslakeid")
+
+
+states_lagos <- lagos$state %>%
+  select(-state_pct_in_nwi, -state_ha_in_nwi,-state_ha)
+
+state_nutr <- inner_join(nutr_spatial,states_lagos, by = "state_zoneid")
+```
+
+
+### 2b) Second, you will need to join this point dataset to the us_boundaries 
+data. 
+
+```{r}
+states <- us_states()
+states <- states %>%
+        st_transform(2163)
+
+states_and_nutrients <- inner_join(state_nutr,states,by = "state_name")
+
+```
+
+
+### 2c) Then you will want to group by state and sum all the observations in that
+state and arrange that data from most to least total observations per state. 
+
+```{r}
+state_nutr_counts <- states_and_nutrients %>%
+    group_by(state_name) %>%
+    summarize(count=n()) %>%
+    arrange(desc(count))
+
+head(state_nutr_counts)  
+```
+THe great land of Minnesota has the most observations, with approximately 360,000 nutrient samples. Considering the humungous amount of lakes in this state, nobody will be surprised. Because sampling for water quiality tends to be skewed to lakes that NEED to be tested, its understandable that Minnesota has the highest count of water quality samplings. 
+
+
+
+
+##3 Is there a spatial pattern in Secchi disk depth for lakes with at least 200 
+observations?
+
+```{r}
+mapview(spatial_200, zcol='secchi')
+
+```
+
+Some of the murkiest lakes are found near Rhode Island and Minneapolis. I noticed a slight trend of lakes near population centers having smaller secchi readings. To potentially poke holes in this data, these trends could be influenced by varying sampling efforts and procedures. I wager there is a correlation between secchi disk depth and the number of depths. the *Dirtiest* lakes will likely receive the most attention and funding. The squeekiest wheels get the grease. 
+
+
+
+```
+
